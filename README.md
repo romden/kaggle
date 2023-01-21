@@ -1,1 +1,1 @@
-This repo contains code for some kaggle datasets.
+This repo contains scripts developed for some kaggle challenges.
