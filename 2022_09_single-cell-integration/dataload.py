@@ -23,7 +23,8 @@ def load_data(dstype='cite', train_x=True, train_y=True, test=True):
         if train_y:
             y_train = pd.read_hdf(FP_MULTIOME_TRAIN_TARGETS).values.astype('float32') # (105942, 23418)     
         if test:
-            X_test = pd.read_hdf(FP_MULTIOME_TEST_INPUTS_reduced).values.astype('float32') # reduced=(16780, 228942) (55935, 228942)
+            X_test = pd.read_hdf(FP_MULTIOME_TEST_INPUTS).values.astype('float32') # (55935, 228942)
+            #X_test = pd.read_hdf(FP_MULTIOME_TEST_INPUTS_reduced).values.astype('float32') # (16780, 228942) 
             
     print('X_train.shape:', X_train.shape if X_train is not None else None)
     print('y_train.shape:', y_train.shape if y_train is not None else None)

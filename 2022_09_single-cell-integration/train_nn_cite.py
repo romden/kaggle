@@ -2,7 +2,6 @@ import sys, os, json, dill
 import numpy as np
 import pandas as pd
 
-from sklearn.decomposition import TruncatedSVD
 #from sklearn.model_selection import StratifiedKFold
 from sklearn.model_selection import KFold
 
@@ -23,10 +22,12 @@ np.random.seed(SEED*3)
 
 # data directory
 DATA_DIR = os.path.join(PATH_WORKING, 'data_cite_x512')
+#DATA_DIR = os.path.join(PATH_WORKING, 'data_cite')
 pipe_y = dill.load(open(os.path.join(DATA_DIR, 'pipe_y.dill'), 'rb'))
 
 # model directory with results
 MODEL_DIR = os.path.join(PATH_WORKING, 'nn_cite_x512')
+#MODEL_DIR = os.path.join(PATH_WORKING, 'nn_cite')
 if not os.path.exists(MODEL_DIR):
     os.mkdir(MODEL_DIR)
 
@@ -60,6 +61,19 @@ def cosine_decay(initial_learning_rate, decay_steps, alpha):
         decayed = (1 - alpha) * cosine_decay + alpha
         return initial_learning_rate * decayed
     return wrapper
+
+def get_callbacks(checkpoint_filepath=None, lr_scheduler=None):
+    callbacks = []
+
+    if checkpoint_filepath:
+        callbacks.append(tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_filepath,
+                                                            save_best_only=True,
+                                                            monitor='val_loss',
+                                                            verbose=1))
+    if lr_scheduler:
+        callbacks.append( tf.keras.callbacks.LearningRateScheduler(scheduler, verbose=False) )
+    
+    return callbacks
 
 
 def train_folds():    
@@ -96,18 +110,11 @@ def train_folds():
         model.compile(optimizer=optimizer, loss=loss) #, run_eagerly=True
         #model.summary()
         
-        callbacks = [
-            tf.keras.callbacks.ModelCheckpoint(
-                filepath=os.path.join(MODEL_DIR, f'fold_{k}', 'model'),
-                save_best_only=True,
-                monitor='val_loss',
-                verbose=1),
-            #tf.keras.callbacks.LearningRateScheduler(scheduler, verbose=False),
-        ]
+        callbacks = get_callbacks(os.path.join(MODEL_DIR, f'fold_{k}', 'model'))
 
         history = model.fit(ds_train, validation_data=ds_valid, epochs=CFG.epochs, callbacks=callbacks).history
         
-        model = tf.keras.models.load_model(os.path.join(MODEL_DIR, f'fold_{k}', 'model'))
+        model = tf.keras.models.load_model(callbacks[0].filepath)
         y_pred = model.predict(ds_valid)
         y_pred = pipe_y.inverse_transform(y_pred)    
 
@@ -122,6 +129,7 @@ def train_folds():
             f.write(json.dumps(history, indent=4))
         
         print('Fold:', k, 'Score:', score)
+        break
     
     print('CV score:', np.mean(scores))
 
@@ -173,25 +181,9 @@ def predict_folds():
         np.save(os.path.join(MODEL_DIR, f'y_fold_{k}.npy'), y_fold)
 
 
-def semi_supervised(y_true, y_pred):
-    
-    omega = 10
-    
-    targets = y_true[:,:-1]
-    weights = y_true[:,-1]
-
-    preds = y_pred[:,:-1]
-    probs = y_pred[:,-1]
-
-    mse = tf.math.reduce_mean(tf.math.pow(targets - preds, 2), axis=1) * weights
-    contrastive = tf.math.log(tf.clip_by_value(probs, 1e-6, 1))
-
-    loss = omega * tf.math.reduce_mean(mse) - tf.math.reduce_mean(contrastive)
-
-    return loss
-
-
 def train_semi_supervised():
+
+    from losses import semi_supervised
 
     # load data
     X = np.load(os.path.join(DATA_DIR, 'X_train.npy'))
@@ -221,78 +213,153 @@ def train_semi_supervised():
                                      np.zeros( (X_unlabeled.shape[0], y_train.shape[1]+1) ),
                                      ], axis=0)
 
+        # DATASETS
+        # pretraining
         ds_pretrain = datagen.create_ds(X_pretrain, y_pretrain, CFG.batch_size)
-
-        #strategy = tf.distribute.MirroredStrategy()
-        #with strategy.scope():
-        #optimizer = tf.keras.optimizers.Adam(learning_rate=CFG.learning_rate)         
-        #loss = semi_supervised
-        model, premodel = builder.build_cite_selfsv(n_inputs, n_outputs, n_units=CFG.n_units, rate=CFG.rate, l2=CFG.l2)
-
-        callbacks = [
-            tf.keras.callbacks.LearningRateScheduler(scheduler_selfsv, verbose=False), # poor perf
-        ]
-        
-        #premodel.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4), loss=semi_supervised)
-        #premodel.fit(ds_pretrain, epochs=20, callbacks=None)
-
-
-        # ============== TRAINING ==============
+        # training
         ds_train = datagen.create_ds(X_train, y_train, CFG.batch_size)
-        ds_valid = datagen.setup_autoshard( tf.data.Dataset.from_tensor_slices( (X_test, y_test) ) ).batch(CFG.batch_size)
+        ds_valid = datagen.setup_autoshard( tf.data.Dataset.from_tensor_slices( (X_test, y_test) ) ).batch(1024)
 
-        #strategy = tf.distribute.MirroredStrategy()
-        #with strategy.scope():
-        #optimizer = tf.keras.optimizers.Adam(learning_rate=CFG.learning_rate)
-        #loss = tf.keras.losses.MeanSquaredError()   
-        #model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4), loss=tf.keras.losses.MeanSquaredError())     
+        # create model
+        model, premodel, encoder = builder.build_cite_selfsv(n_inputs, n_outputs, n_units=CFG.n_units, rate=CFG.rate, l2=CFG.l2)
+        model.summary()    
+
+        folder = os.path.join(MODEL_DIR, 'pretrain', f'fold_{k}')
+        if not os.path.exists(folder):
+            os.mkdir(folder)
         
-        callbacks = [
-            tf.keras.callbacks.ModelCheckpoint(
-                #filepath=os.path.join(MODEL_DIR, 'tmp', 'model'), 
-                filepath=os.path.join(MODEL_DIR, 'pretrain', f'fold_{k}', 'model'),
-                save_best_only=True,
-                monitor='val_loss',
-                verbose=1),
-            tf.keras.callbacks.LearningRateScheduler(scheduler, verbose=False),
-        ]
-
-        #history = model.fit(ds_train, validation_data=ds_valid, epochs=50, callbacks=callbacks).history #CFG.epochs        
-        #model = tf.keras.models.load_model(callbacks[0].filepath)
-        #history = model.fit(ds_train, epochs=20, callbacks=None).history
+        #callbacks = get_callbacks(os.path.join(folder, 'model'))
 
         # ===========================
         # second round steps: 1870, 999
         # ===========================
-        for lr1, lr2 in zip([1e-4, 8e-5], [8e-5, 6e-5]):
-            learning_rate_fn = cosine_decay(initial_learning_rate=lr1, decay_steps=30*1870, alpha=0.6)
-            optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate_fn)
-            premodel.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=lr1), loss=semi_supervised)
-            premodel.fit(ds_pretrain, epochs=30)
-
-            learning_rate_fn = cosine_decay(initial_learning_rate=lr2, decay_steps=30*999, alpha=0.6)
-            optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate_fn)
-            model.compile(optimizer=optimizer, loss=tf.keras.losses.MeanSquaredError())
-            history = model.fit(ds_train, epochs=30).history
-        # ===========================
         
+        for lr1, lr2 in zip([1e-4], [2e-5]):
+            #learning_rate_fn = cosine_decay(initial_learning_rate=lr1, decay_steps=30*1870, alpha=0.6)
+            #optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate_fn)
+            #optimizer = tf.keras.optimizers.Adam(learning_rate=lr1)
+            #premodel.compile(optimizer=optimizer, loss=semi_supervised)
+            #premodel.fit(ds_pretrain, epochs=20)
+            #premodel.save(os.path.join(folder, 'premodel'))
+            premodel.load_weights( os.path.join(folder, 'premodel', 'variables', 'variables' ) )
+
+            learning_rate_fn = cosine_decay(initial_learning_rate=lr2, decay_steps=20*999, alpha=0.1)
+            optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate_fn)
+            #optimizer = tf.keras.optimizers.Adam(learning_rate=lr2)
+            model.compile(optimizer=optimizer, loss=tf.keras.losses.MeanSquaredError())
+            #history = model.fit(ds_train, epochs=20).history
+        # ===========================
+        '''
+        # ===========================
+        premodel.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4), loss=semi_supervised)
+        premodel.fit(ds_pretrain, epochs=25)
+
+        X_tmp = encoder.predict(X_train, batch_size=1024)   
+        ds_train = datagen.create_ds(X_tmp, y_train, CFG.batch_size)
+        model = builder.build_cite_ffn(X_tmp.shape[1], n_outputs, n_units=CFG.n_units, rate=CFG.rate, l2=CFG.l2)
+
+        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4), loss=tf.keras.losses.MeanSquaredError())
+        history = model.fit(ds_train, epochs=25).history
+
+        y_pred = tf.keras.Sequential([encoder, model]).predict(X_test, batch_size=1024)
+        # ===========================
+        '''        
         y_pred = model.predict(ds_valid)
         y_pred = pipe_y.inverse_transform(y_pred)    
 
         score = correlation_score(y_true[test_index], y_pred)
         scores.append(score)
-        history['score'] = score     
-
+        '''history['score'] = score     
+        
         if 'lr' in history:
             del history['lr']
 
-        with open(os.path.join(os.path.dirname(callbacks[0].filepath), 'history.json'), 'w') as f:
-            f.write(json.dumps(history, indent=4))
+        with open(os.path.join(folder, 'history.json'), 'w') as f:
+            f.write(json.dumps(history, indent=4))'''
         
         print('Fold:', k, 'Score:', score)
-        #break
+        break
     
     print('CV score:', np.mean(scores))
+
+
+def model_selection():
+
+    # load data
+    X = np.load(os.path.join(DATA_DIR, 'X_train.npy'))
+    y = np.load(os.path.join(DATA_DIR, 'y_train.npy'))
+    y_true = pd.read_hdf(FP_CITE_TRAIN_TARGETS).values.astype('float32')
+
+    def find_best(params, name, values):
+        scores = []  
+        for val in values:
+            params[name] = val
+            score = do_cv(params, X, y, y_true)
+            scores.append(score)
+            print(f'{name}: {val} score: {score}')
+        idx = np.argmax(scores)
+        params[name] = values[idx]
+        print(f'best {name}: {values[idx]}')
+
+    
+    class CrossValidationWrapper:
+
+        def __init__(self, params, X, y, y_true, pipe_y):
+            self.params = params
+            self.X = X
+            self.y = y
+            self.y_true = y_true
+            self.pipe_y = pipe_y
+
+        def build_model(self, shapes, use_mirrored=False):
+
+            params = self.params
+            _, n_inputs = shapes['X_train']
+            _, n_outputs = shapes['y_train']
+
+            tf.keras.backend.clear_session()
+            if use_mirrored:
+                strategy = tf.distribute.MirroredStrategy()
+                with strategy.scope():            
+                    optimizer = tf.keras.optimizers.Adam(learning_rate=params['learning_rate'])
+                    loss = tf.keras.losses.MeanSquaredError()
+                    model = builder.build_cite_ffn(n_inputs, n_outputs, params['n_units'], params['rate'], params['l2'])
+            else:
+                optimizer = tf.keras.optimizers.Adam(learning_rate=params['learning_rate'])
+                loss = tf.keras.losses.MeanSquaredError()
+                model = builder.build_cite_ffn(n_inputs, n_outputs, params['n_units'], params['rate'], params['l2']) 
+            model.compile(optimizer=optimizer, loss=loss)
+            model.summary() 
+            return model
+
+        def compute_score(self, model, X_test, y_true):
+            # prediction
+            y_pred = model.predict(X_test)        
+            # transform predictions
+            y_pred = self.pipe_y.inverse_transform(y_pred)
+            # compute score
+            score = correlation_score(y_true, y_pred)
+            return score
+
+
+    params = {'learning_rate': 1e-4, 'batch_size': 64, 'n_units': 256, 'epochs': 30, 'n_splits': 7, 'rate': 0.3, 'l2': 1e-3}
+    cvwrapper = CrossValidationWrapper(params, X, y, y_true, pipe_y)
+
+    from cross_validation import do_cv
+    
+    score = do_cv(cvwrapper)
+    print('CV score:', score)
+
+    #model = build_cite_ffn2(n_inputs, n_outputs, n_units, rate=0.3, l2=1e-3)
+
+    #find_best(params, name='batch_size', values=[1, 2, 4, 8, 16]) # find best batch_size [32, 48, 64, 96, 128]
+    #find_best(params, name='learning_rate', values=[1e-3, 5e-4, 1e-4, 5e-5, 1e-5]) # find best learning_rate
+    #find_best(params, name='epochs', values=[30, 50, 70])
+    
+    #with open(os.path.join(MODEL_DIR, 'cv' 'params.json'), 'w') as f: f.write(json.dumps(params, indent=4))
+
+    # CV score: 0.8965082538994621 build_cite_ffn2
+    # CV score: 0.894862601366049  build_cite_ffn
 
 
 if __name__ == "__main__":
@@ -304,7 +371,8 @@ if __name__ == "__main__":
     #train_folds()
     #predict_test()
     #predict_folds()
-    train_semi_supervised()
+    #train_semi_supervised()
+    model_selection()
 
 
 

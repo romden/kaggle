@@ -3,50 +3,36 @@ import pandas as pd
 
 import os
 import dill
+import time
+import itertools
 
 from config import *
 
-# true training targets
-trues = {
-    'cite': pd.read_hdf(FP_CITE_TRAIN_TARGETS).values.astype('float32'),
-    'multi': pd.read_hdf(FP_MULTIOME_TRAIN_TARGETS).values.astype('float32')
-}
 
-# test predictions
+# path to predictions
 paths = {
-    #'cite': os.path.join(PATH_WORKING, 'data_cite_x512', 'y_pred.npy'), 
-    #'cite': os.path.join(PATH_WORKING, 'nnlgb_cite_x512', 'y_pred.npy'),
-    'cite': os.path.join(PATH_WORKING, 'pdl_cite_x512', 'y_pred.npy'),
-    'multi': os.path.join(PATH_WORKING, 'nn_multi_x1024', 'y_pred.npy')
+    'cite': os.path.join(PATH_WORKING, 'selfsv_cite_x512_y140', 'train_ffn_vae', 'y_pred.npy'),
+    'multi': os.path.join(PATH_WORKING, 'selfsv_multi_x512_y512', 'train_ffn_vae', 'y_pred.npy')
 }
 
 
-def predictions_df(cell_ids, gene_ids, values):    
-    data = {'cell_id': [], 'gene_id': [], 'target': []}    
-    for i, cell_id in enumerate(cell_ids):
-        data['cell_id'] += [cell_id]*len(gene_ids)
-        data['gene_id'] += gene_ids
-        data['target'] += values[i,:].tolist()    
-    return pd.DataFrame(data)
+def main():
 
+    def helper(cell_id, gene_id):
+        """Generate all combinations of cell_id & gene_id"""
+        data = list(itertools.product(cell_id, gene_id))
+        return np.array(data, dtype=[('cell_id', np.dtype('O')), ('gene_id', np.dtype('O'))])
 
-def main():    
-    
-    data = dill.load(open(os.path.join(PATH_DATA, 'test_ids.dill'), 'rb'))
-    
-    dfs = []    
-    for key in ['cite', 'multi']:
-        # load predictions
-        y_pred = np.load(paths[key])
-        # clip predictions to the range seen in train data
-        if False: 
-            lb = np.min(trues[key], axis=0, keepdims=True)
-            ub = np.max(trues[key], axis=0, keepdims=True)
-            y_pred = np.clip(y_pred, lb, ub)
-        # make pandas dataframe
-        df = predictions_df(cell_ids=data[key]['cell_id'], gene_ids=data[key]['gene_id'], values=y_pred)
-        dfs.append(df)
-    df = pd.concat(dfs, axis=0)
+    test_ids = dill.load(open(os.path.join(PATH_DATA, 'test_ids.dill'), 'rb'))
+
+    cite_ids = helper(test_ids['cite']['cell_id'], test_ids['cite']['gene_id'])    
+    multi_ids = helper(test_ids['multi']['cell_id'], test_ids['multi']['gene_id'])
+    predictions = np.concatenate([np.load(paths['cite']).ravel(), np.load(paths['multi']).ravel()])  
+
+    assert len(cite_ids)+len(multi_ids) == len(predictions)
+
+    df = pd.concat([pd.DataFrame(cite_ids), pd.DataFrame(multi_ids)], ignore_index=True)
+    df['target'] = predictions
 
     eval_ids = pd.read_csv(FP_EVALUATION_IDS, dtype={'row_id': int, 'cell_id': str, 'gene_id': str})
     df = eval_ids.merge(df, on=['cell_id', 'gene_id'], how='left')
@@ -54,10 +40,10 @@ def main():
 
     submission = pd.read_csv(os.path.join(PATH_DATA, 'sample_submission.csv'), usecols=['row_id'], dtype={'row_id': int})
     submission = submission.merge(df, on='row_id', how='left')
-    assert all(submission['target'].notna()) and len(submission.columns) == 2
+    assert all(submission['target'].notna())
     submission['target'] = submission['target'].round(6) # reduce the size of the csv    
     submission.to_csv(os.path.join(PATH_WORKING, 'sample_submission.csv'), index=False)  
-    print('submission created.')      
+    print('submission created.')
 
 
 if __name__ == "__main__":
@@ -67,7 +53,6 @@ if __name__ == "__main__":
     python other_research/kaggle-02-single-cell-integration/submission.py
     """
     main()
-
 
 # python -c "import numpy as np; print(np.__version__)"
 # numpy version in cpu and gpu: 1.19.5  1.20.3

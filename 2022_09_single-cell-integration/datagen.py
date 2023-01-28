@@ -86,3 +86,72 @@ def simple_generator(X, y, batch_size=128, shuffle=True, drop_remainder=True, ov
             yield batch
         
     return wrapper
+
+
+def sampler_generator(inputs, targets, batch_size, seed=1000, shuffle=True):
+    """The outer enclosing function. 
+        Generates batches of data stored in dictionaries.
+    
+    Args:
+        inputs: dict
+        targets: dict
+        batch_size: int
+        seed: int
+        shuffle: bool
+
+    Returns:
+        wrapper: generator
+    """
+    def get_batch_indexes(idx, batch_indexes, indexes, shuffle=True):
+        """Chooses indexes of data points fro the batch"""    
+        batch_size = len(batch_indexes)
+        data_size = len(indexes)
+        for i in range(batch_size):
+            if idx >= data_size:
+                idx = 0
+                if shuffle:
+                    np.random.shuffle(indexes)                              
+            batch_indexes[i] = indexes[idx]            
+            idx += 1  
+        return idx  
+
+    # init
+    np.random.seed(seed)
+    keys = list(inputs.keys())
+    indexes = {key: np.arange(len(inputs[key])) for key in keys}
+    batch_indexes = {key: [0]*batch_size for key in keys}    
+
+    def wrapper():
+        """The nested function that generates the data."""
+        # shuffle 
+        if shuffle:
+            for key in keys:
+                np.random.shuffle(indexes[key])
+        
+        # current location
+        current = {key: 0 for key in keys}
+        # determine number of steps in one epoch
+        n_steps = min([len(idxs)//batch_size for idxs in indexes.values()])
+
+        for _ in range(n_steps):
+
+            current = {key: get_batch_indexes(current[key], batch_indexes[key], indexes[key], shuffle) for key in keys}
+
+            batch_inputs = {key: inputs[key][batch_indexes[key]] for key in keys}
+            batch_targets = {key: targets[key][batch_indexes[key]] for key in keys}
+
+            yield batch_inputs, batch_targets
+        
+    return wrapper
+
+
+def create_ds_single_model(inputs, targets, batch_size, seed=1000, shuffle=True):
+
+    inputs_signature = {key: tf.TensorSpec(shape=(None, None), dtype=tf.float32) for key in inputs.keys()}
+    targets_signature = {key: tf.TensorSpec(shape=(None, None), dtype=tf.float32) for key in targets.keys()}
+                       
+    gn = sampler_generator(inputs, targets, batch_size, seed, shuffle)
+    ds = tf.data.Dataset.from_generator(gn, output_signature=(inputs_signature, targets_signature))
+    #ds = setup_autoshard(ds)
+
+    return ds
